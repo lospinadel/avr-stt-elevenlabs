@@ -58,7 +58,11 @@ The server listens for audio input on a specific route (`/transcribe`) and passe
 
 ### 2. **Audio Processing**
 
-The application processes the incoming audio data from Asterisk (typically in PCM format) and converts it to WAV format before sending it to the ElevenLabs API. This ensures compatibility with the API requirements.
+The application processes incoming audio data from Asterisk (usually in PCM format) and converts it using sox to WAV format before sending it to the ElevenLabs API. This ensures compatibility with API requirements. The generated files are deleted after being sent to elevenlabs.
+If you want to keep temporary files, comment out these lines:
+//fs.unlinkSync(rawFilePath); 
+//fs.unlinkSync(wavFilePath);
+//console.log('🧹 Temporary files cleaned up');
 
 ### 3. **ElevenLabs Speech-to-Text API**
 
