@@ -1,132 +1,102 @@
-/**
- * AVR Speech-to-Text Service using ElevenLabs
- *
- * This service receives audio data from Asterisk, converts it to WAV format,
- * and uses ElevenLabs API to transcribe the speech to text.
- *
- * @author Agent Voice Response <info@agentvoiceresponse.com>
- * @contributors Giuseppe Careri <info@gcareri.com>, seif walid mamdouh
- * @version 1.0.0
- */
+const express = require('express');
+const { ElevenLabsClient } = require('elevenlabs');
+const fs = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
+const os = require('os');
+const crypto = require('crypto');
 
-const express = require("express");
-const { ElevenLabsClient } = require("elevenlabs");
-const wav = require("node-wav");
+require('dotenv').config();
 
-// Load environment variables
-require("dotenv").config();
-
-// Initialize Express app
 const app = express();
+app.use(express.raw({ type: 'application/octet-stream', limit: '50mb' }));
 
-// Configure middleware for raw binary data
-// This allows receiving audio data as a raw buffer
-app.use(express.raw({ type: "application/octet-stream", limit: "50mb" }));
-
-/**
- * Handles the transcription request
- *
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @returns {Object} JSON response with transcription
- */
 const handleTranscriptionRequest = async (req, res) => {
-  // Log request timestamp
-  console.log(
-    `\n[${new Date().toISOString()}] Transcription Service: Received request on /transcribe`
-  );
+  console.log(`\n[${new Date().toISOString()}] 🔔 Transcription request received`);
 
-  // Extract audio data and metadata from request
   const audioBuffer = req.body;
-  const sampleRateHeader = req.headers["x-sample-rate"];
-  const sampleRate = parseInt(sampleRateHeader, 10);
+  const sampleRateHeader = req.headers['x-sample-rate'];
+  const declaredSampleRate = parseInt(sampleRateHeader, 10);
+  const audioFormat = req.headers['x-audio-format'] || 'audio/x-signed-linear';
 
-  // Default to Asterisk's slin format (Signed Linear PCM)
-  const audioFormat = req.headers["x-audio-format"] || "audio/x-signed-linear";
+  console.log(`📦 Audio format: ${audioFormat}`);
+  console.log(`📏 Buffer size: ${(audioBuffer.length / 1024).toFixed(2)} KB`);
+  console.log(`🎚️ Declared Sample Rate (header): ${declaredSampleRate || 'Not Provided'}`);
 
-  // Validate audio data
   if (!audioBuffer || audioBuffer.length === 0) {
-    console.error("Received empty audio buffer.");
-    return res.status(400).json({ message: "Empty audio data received." });
+    console.error('❌ Error: Empty audio buffer.');
+    return res.status(400).json({ message: 'Empty audio buffer received.' });
   }
 
-  // Validate sample rate
-  if (!sampleRate || isNaN(sampleRate)) {
-    console.error(
-      `Invalid or missing X-Sample-Rate header: ${sampleRateHeader}`
-    );
-    return res
-      .status(400)
-      .json({ message: "Missing or invalid X-Sample-Rate header." });
-  }
-
-  // Log audio metadata
-  console.log(
-    `Received audio buffer: ${(audioBuffer.length / 1024).toFixed(
-      2
-    )} KB, Sample Rate: ${sampleRate} Hz, Format: ${audioFormat}`
-  );
+  const tmpDir = os.tmpdir();
+  const id = crypto.randomUUID();
+  const rawFilePath = path.join(tmpDir, `audio-${id}.raw`);
+  const wavFilePath = path.join(tmpDir, `audio-${id}.wav`);
 
   try {
-    // Convert PCM to WAV format
-    console.log("Converting PCM to WAV format...");
-    
-    // Convert the buffer to an array of samples (16-bit PCM)
-    const samples = [];
-    for (let i = 0; i < audioBuffer.length; i += 2) {
-      // Read 16-bit little-endian sample
-      const sample = audioBuffer.readInt16LE(i);
-      // Normalize to [-1, 1] range for WAV encoding
-      samples.push(sample / 32768.0);
+    // Check that sox is installed and available in the PATH
+    try {
+      execSync('sox --version', { stdio: 'ignore' });
+    } catch (soxCheckError) {
+      console.error('❌ Sox is not installed or not available in the PATH.');
+      return res.status(500).json({ message: 'Sox is not installed on your system.' });
     }
-    
-    // Create a WAV buffer with proper headers
-    const wavBuffer = wav.encode([samples], {
-      sampleRate: sampleRate,
-      float: false,
-      bitDepth: 16,
-    });
-    
-    // Log conversion result
-    console.log(`Converted to WAV: ${(wavBuffer.length / 1024).toFixed(2)} KB`);
-    
-    // Create a Blob with the WAV data for ElevenLabs API
-    const audioBlob = new Blob([wavBuffer], { type: "audio/wav" });
 
-    // Initialize ElevenLabs client
+    // Save raw audio file temporarily
+    fs.writeFileSync(rawFilePath, audioBuffer);
+    console.log(`💾 (TEMP) Saved raw audio to: ${rawFilePath}`);
+
+    // Convert to WAV (8000 Hz)
+    const soxCommand = `sox -r 8000 -e signed-integer -b 16 -c 1 -t raw "${rawFilePath}" "${wavFilePath}"`;
+    console.log(`🔧 Executing sox command: ${soxCommand}`);
+    execSync(soxCommand, { stdio: 'ignore' });
+
+    if (!fs.existsSync(wavFilePath)) {
+      throw new Error('The WAV file was not created by sox.');
+    }
+
+    console.log(`✅ (TEMP) WAV file created: ${wavFilePath}`);
+
+    const wavBuffer = fs.readFileSync(wavFilePath);
+    console.log(`📤 WAV size: ${(wavBuffer.length / 1024).toFixed(2)} KB`);
+
+    // If you want to keep temporary files, comment out these lines:
+    //fs.unlinkSync(rawFilePath);
+    //fs.unlinkSync(wavFilePath);
+    //console.log('🧹 Temporary files cleaned up');
+
+    // Send to ElevenLabs
     const client = new ElevenLabsClient({
       apiKey: process.env.ELEVENLABS_API_KEY,
     });
 
-    // Send audio to ElevenLabs for transcription
-    const transcription = await client.speechToText.convert({
-      file: audioBlob,
-      model_id: process.env.ELEVENLABS_MODEL_ID || "scribe_v1",
+    console.log('🚀 Sending WAV to ElevenLabs...');
+
+    const result = await client.speechToText.convert({
+      file: new Blob([wavBuffer], { type: 'audio/wav' }),
+      model_id: process.env.ELEVENLABS_MODEL_ID || 'scribe_v1',
       num_speakers: 1,
-      language_code: process.env.ELEVENLABS_LANGUAGE_CODE || "en",
+      language_code: process.env.ELEVENLABS_LANGUAGE_CODE || 'es',
       tag_audio_events: false,
-      timestamps_granularity: "none"
+      timestamps_granularity: 'none'
     });
 
-    // Log transcription result
-    console.log(`Transcription: ${transcription.text || 'No text transcribed'}`);
+    if (result.text) {
+      console.log(`📝 Transcription: ${result.text}`);
+    } else {
+      console.warn('⚠️ No text transcribed.');
+    }
 
-    // Return transcription text
-    return res.json({ transcription: transcription.text || '' });
-  } catch (error) {
-    // Log and return error
-    console.error("Error processing audio:", error);
-    return res
-      .status(500)
-      .json({ message: "Error processing audio", error: error.message });
+    return res.json({ transcription: result.text || '' });
+  } catch (err) {
+    console.error('❌ Error during audio processing:', err);
+    return res.status(500).json({ message: 'Error processing audio', error: err.message });
   }
 };
 
-// Register the transcription endpoint
-app.post("/transcribe", handleTranscriptionRequest);
+app.post('/transcribe', handleTranscriptionRequest);
 
-// Start the server
 const PORT = process.env.PORT || 6022;
 app.listen(PORT, () => {
-  console.log(`ElevenLabs STT listening on port ${PORT}`);
+  console.log(`🚀 ElevenLabs STT listening on port ${PORT}`);
 });
